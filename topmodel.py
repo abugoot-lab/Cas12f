@@ -1,31 +1,23 @@
 import pandas as pd
-from sklearn import linear_model
-import random
+from sklearn.linear_model import RidgeCV
+from sklearn.preprocessing import StandardScaler
 from biotransformers import BioTransformers
 import numpy as np
-from sklearn.preprocessing import StandardScaler
+import argparse
 
-function=pd.read_csv('round5.csv')
-y=function['average']
-seq=pd.read_csv('psa_round5_representation.csv',header=None)
+def read_data(avg_csv, emb_csv):
+    y = pd.read_csv(avg_csv)['average']
+    seq = pd.read_csv(emb_csv, header=None)
+    return y, seq
 
-scaler = StandardScaler()
-scaler.fit(seq)
-a=scaler.transform(seq)
-# pkl_filename = "preprocess.pkl"
-# with open(pkl_filename, 'wb') as file:
-#     pickle.dump(scaler, file)
+def train_model(X, y):
+    scaler = StandardScaler().fit(X)
+    X_scaled = scaler.transform(X)
+    clf = RidgeCV().fit(X_scaled, y)
+    return clf, scaler
 
-# # Load from file
-# with open(pkl_filename, 'rb') as file:
-#     pickle_model = pickle.load(file)
-
-
-clf=linear_model.RidgeCV()
-clf.fit(a,y)
-print(clf.score(a,y))
-
-aa_to_int = {
+def mutate_protein(WT, int_to_aa, mut_position, aa_mut):
+    aa_to_int = {
     'M':1,
     'R':2,
     'H':3,
@@ -47,38 +39,44 @@ aa_to_int = {
     'Y':19,
     'W':20,
     'L':21}
-int_to_aa = {value:key for key, value in aa_to_int.items()}
+    int_to_aa = {value:key for key, value in aa_to_int.items()}
+    new_protein_list, record = [], []
+    for pos in mut_position:
+        for mut in aa_mut:
+            new_protein = list(WT)
+            new_protein[pos] = int_to_aa[mut]
+            mut_record = ''.join([str(pos+1), int_to_aa[mut]])  # Adjusting index for human-readable format
+            new_protein = ''.join(new_protein)
+            new_protein_list.append(new_protein)
+            record.append(mut_record)
+    return new_protein_list, record
 
-WT='MPSETYITKTLSLKLIPSDEEKQALENYFITFQRAVNFAIDRIVDIRSSFRYLNKNEQFPAVCDCCGKKEKIMYVNISNKTFKFKPSRNQKDRYTKDIYTIKPNAHICKTCYSGVAGNMFIRKQMYPNDKEGWKVSRSYNIKVNAPGLTGTEYAMAIRKAISILRSFEKRRRNAERRIIEYEKSKKEYLELIDDVEKGKTNKIVVLEKEGHQRVKRYKHKNWPEKWQGISLNKAKSKVKDIEKRIKKLKEWKHPTLNRPYVELHKNNVRIVGYETVELKLGNKMYTIHFASISNLRKPFRKQKKKSIEYLKHLLTLALKRNLETYPSIIKRGKNFFLQYPVRVTVKVPKLTKNFKAFGIDRGVNRLAVGCIISKDGKLTNKNIFFFHGKEAWAKENRYKKIRDRLYAMAKKLRGDKTKKIRLYHEIRKKFRHKVKYFRRNYLHNISKQIVEIAKENTPTVIVLEDLRYLRERTYRGKGRSKKAKKTNYKLNTFTYRMLIDMIKYKAEEAGVPVMIIDPRNTSRKCSKCGYVDENNRKQASFKCLKCGYSLNADLNAAVNIAKAFYECPTFRWEEKLHAYVCSEPDK'
-new_protein_list=[]
-record=[]
-mut_position=np.arange(480)+11
-aa_mut=np.arange(21)+1
-for pos in mut_position:
-    for mut in aa_mut:
-        new_protein = list(WT)
-        new_protein[int(pos)] = int_to_aa[mut]
-        mut_record=''.join([str(pos),int_to_aa[mut]])
-        new_protein = ''.join([str(item) for item in new_protein])
-        new_protein_list.append(new_protein)
-        record.append(mut_record)
-if (len(record) % 2) == 1: 
-    record.append('WT')
-    new_protein_list.append(WT)
+def compute_embeddings(new_protein_list):
+    bio_trans = BioTransformers(backend="esm1b_t33_650M_UR50S", multi_gpu=True)
+    embeddings = bio_trans.compute_embeddings(new_protein_list, pool_mode=('cls', 'mean'), batch_size=2)
+    return embeddings['mean']
 
+def main(avg_csv, emb_csv):
+    y, seq = read_data(avg_csv, emb_csv)
+    clf, scaler = train_model(seq, y)
 
-bio_trans = BioTransformers(backend="esm1b_t33_650M_UR50S",multi_gpu=True)
-embeddings = bio_trans.compute_embeddings(new_protein_list, pool_mode=('cls','mean'),batch_size=2)
+    # Assuming mut_position and aa_mut as given in the original code
+    new_protein_list, record = mutate_protein(WT, int_to_aa, np.arange(1,480), np.arange(1, 22))
+    mean_emb = compute_embeddings(new_protein_list)
+    mean_emb_scaled = scaler.transform(mean_emb)
+    predictions = clf.predict(mean_emb_scaled)
 
-mean_emb = embeddings['mean']
-mean_emb=scaler.transform(mean_emb)
+    # Save predictions and records
+    np.savetxt('predict.csv', np.hstack((mean_emb_scaled, predictions[:, None])), delimiter=",")
+    
+    with open("record.txt", "w") as textfile:
+        for element in record:
+            textfile.write(element + "\n")
 
-c=clf.predict(mean_emb)
-d=np.concatenate((mean_emb,c[:,None]),axis=1)
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Predict values for protein mutations.")
+    parser.add_argument("--avg_csv", required=True, help="CSV file containing 'average' values.")
+    parser.add_argument("--emb_csv", required=True, help="CSV file containing sequence embeddings.")
+    args = parser.parse_args()
 
-np.savetxt('predict.csv',d,delimiter=",")
-
-textfile = open("record.txt", "w")
-for element in record:
-    textfile.write(element + "\n")
-textfile.close()
+    main(args.avg_csv, args.emb_csv)
